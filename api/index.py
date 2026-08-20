@@ -214,6 +214,25 @@ async def get_db():
     finally:
         await conn.close()
 
+@app.get("/")
+async def root():
+    """Landing so / does not 404 in browsers."""
+    return {
+        "service": "x402-secure-gateway",
+        "version": "1.1.0",
+        "status": "ok",
+        "docs": {
+            "health": "/health",
+            "challenge": "/v1/payment-required/{service}",
+            "call": "POST /v1/call",
+            "call_status": "GET /v1/calls/{call_id}",
+        },
+        "protocol": {
+            "x402Version": 2,
+            "headers": ["PAYMENT-REQUIRED", "PAYMENT-SIGNATURE", "PAYMENT-RESPONSE"],
+        },
+    }
+
 @app.get("/health")
 async def health():
     return {
