@@ -1,5 +1,5 @@
 """
-x402 Secure Gateway – Control Plane (v1.1 – protocol-aligned)
+x402 Secure Gateway – Control Plane (v1.1.1 – protocol-aligned)
 -------------------------------------------------------------
 Public entry point. Authenticates, verifies payment (legacy body OR
 official PAYMENT-SIGNATURE header + optional facilitator), rate-limits,
@@ -10,7 +10,7 @@ x402 v2 alignment:
   - 402 responses carry base64 PAYMENT-REQUIRED header (PaymentRequired)
   - Accepts PAYMENT-SIGNATURE header (PaymentPayload) from official clients
   - Still accepts legacy body {payment_method, payment_proof} during transition
-  - Optional FACILITATOR_URL for real verify (and later settle)
+  - FACILITATOR_URL defaults to official x402.org testnet facilitator
   - Successful paid responses may include PAYMENT-RESPONSE header
 """
 
@@ -35,7 +35,7 @@ from pydantic import BaseModel, Field
 
 app = FastAPI(
     title="x402 Secure Gateway",
-    version="1.1.0",
+    version="1.1.1",
     description="Protocol-aligned gateway: x402 v2 headers + facilitator verify + legacy body fallback",
 )
 
@@ -53,12 +53,16 @@ CONTENT_GEN_URL = os.getenv("CONTENT_GEN_URL", "http://localhost:8001")
 RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", "30"))
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
 X402_ENABLED = os.getenv("X402_ENABLED", "true").lower() == "true"
-X402_PAY_TO = os.getenv("X402_PAY_TO", os.getenv("X402_RECIPIENT_ADDRESS", ""))
+# Marketplace payTo default (override with X402_PAY_TO env)
+_DEFAULT_PAY_TO = "0xDa1Eab46918882f8656a41cF9fCa80e2415369d1"
+X402_PAY_TO = os.getenv("X402_PAY_TO", os.getenv("X402_RECIPIENT_ADDRESS", _DEFAULT_PAY_TO)).strip()
 X402_NETWORK = os.getenv("X402_NETWORK", "eip155:84532")
 X402_ASSET = os.getenv("X402_ASSET", "0x036CbD53842c5426634e7929541eC2318f3dCF7e")
 X402_ASSET_DECIMALS = int(os.getenv("X402_ASSET_DECIMALS", "6"))
 X402_MAX_TIMEOUT_SECONDS = int(os.getenv("X402_MAX_TIMEOUT_SECONDS", "300"))
-FACILITATOR_URL = os.getenv("FACILITATOR_URL", "").rstrip("/")
+# Official x402.org testnet facilitator (no API key). Override with FACILITATOR_URL.
+_DEFAULT_FACILITATOR = "https://x402.org/facilitator"
+FACILITATOR_URL = (os.getenv("FACILITATOR_URL") or _DEFAULT_FACILITATOR).rstrip("/")
 FACILITATOR_TIMEOUT = float(os.getenv("FACILITATOR_TIMEOUT", "12"))
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "https://x402-micro-pay.com").rstrip("/")
 _rate_buckets: dict[str, list[float]] = {}
@@ -121,7 +125,7 @@ def _decode_b64_json(header_val: str) -> Optional[dict]:
             return None
 
 def build_payment_required(resource_url: str, description: str, amount_usd: float, *, error: str = "Payment required") -> dict:
-    pay_to = X402_PAY_TO or "0x0000000000000000000000000000000000000000"
+    pay_to = X402_PAY_TO or _DEFAULT_PAY_TO
     return {
         "x402Version": 2,
         "error": error,
@@ -144,29 +148,33 @@ def payment_required_response(resource_url: str, description: str, amount_usd: f
 async def facilitator_verify(payment_payload: dict, payment_requirements: dict) -> Tuple[bool, dict]:
     if not FACILITATOR_URL:
         return True, {"skipped": True, "reason": "FACILITATOR_URL not set"}
-    url = f"{FACILITATOR_URL}/facilitator/verify"
+    # Support both base forms: .../facilitator and .../x402
+    candidates = [
+        f"{FACILITATOR_URL}/verify",
+        f"{FACILITATOR_URL}/facilitator/verify",
+    ]
+    if FACILITATOR_URL.endswith("/x402"):
+        candidates.insert(0, f"{FACILITATOR_URL}/verify")
     payload = {"x402Version": 2, "paymentPayload": payment_payload, "paymentRequirements": payment_requirements}
+    last_err: dict = {}
     try:
         async with httpx.AsyncClient(timeout=FACILITATOR_TIMEOUT) as client:
-            resp = await client.post(url, json=payload)
-            try:
-                data = resp.json()
-            except Exception:
-                data = {"raw": resp.text[:500]}
-            if resp.is_success:
-                valid = data.get("isValid", data.get("valid", data.get("success", True)))
-                return (True, data) if valid is not False else (False, data)
-            if resp.status_code == 404:
-                resp2 = await client.post(f"{FACILITATOR_URL}/verify", json=payload)
+            for url in candidates:
                 try:
-                    data2 = resp2.json()
-                except Exception:
-                    data2 = {"raw": resp2.text[:500]}
-                if resp2.is_success:
-                    valid = data2.get("isValid", data2.get("valid", data2.get("success", True)))
-                    return (True, data2) if valid is not False else (False, data2)
-                return False, {"status": resp2.status_code, "body": data2}
-            return False, {"status": resp.status_code, "body": data}
+                    resp = await client.post(url, json=payload)
+                    try:
+                        data = resp.json()
+                    except Exception:
+                        data = {"raw": resp.text[:500]}
+                    if resp.is_success:
+                        valid = data.get("isValid", data.get("valid", data.get("success", True)))
+                        return (True, data) if valid is not False else (False, data)
+                    last_err = {"status": resp.status_code, "body": data, "url": url}
+                    if resp.status_code not in (404, 405):
+                        break
+                except Exception as e:
+                    last_err = {"error": str(e)[:300], "url": url}
+            return False, last_err
     except Exception as e:
         return False, {"error": str(e)[:300]}
 
@@ -216,10 +224,9 @@ async def get_db():
 
 @app.get("/")
 async def root():
-    """Landing so / does not 404 in browsers."""
     return {
         "service": "x402-secure-gateway",
-        "version": "1.1.0",
+        "version": "1.1.1",
         "status": "ok",
         "docs": {
             "health": "/health",
@@ -238,12 +245,14 @@ async def health():
     return {
         "status": "ok",
         "service": "x402-secure-gateway",
-        "version": "1.1.0",
+        "version": "1.1.1",
         "x402_enabled": X402_ENABLED,
         "x402_network": X402_NETWORK,
         "x402_pay_to_configured": bool(X402_PAY_TO),
+        "x402_pay_to_prefix": (X402_PAY_TO[:10] + "...") if X402_PAY_TO else None,
         "facilitator_configured": bool(FACILITATOR_URL),
         "facilitator_url": FACILITATOR_URL or None,
+        "database_configured": bool(DATABASE_URL),
         "protocol": {"x402Version": 2, "headers": ["PAYMENT-REQUIRED", "PAYMENT-SIGNATURE", "PAYMENT-RESPONSE"], "legacy_body_supported": True},
         "timestamp": _now().isoformat(),
     }
