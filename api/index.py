@@ -53,9 +53,30 @@ CONTENT_GEN_URL = os.getenv("CONTENT_GEN_URL", "http://localhost:8001")
 RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", "30"))
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
 X402_ENABLED = os.getenv("X402_ENABLED", "true").lower() == "true"
-# Marketplace payTo default (override with X402_PAY_TO env)
-_DEFAULT_PAY_TO = "0xDa1Eab46918882f8656a41cF9fCa80e2415369d1"
-X402_PAY_TO = os.getenv("X402_PAY_TO", os.getenv("X402_RECIPIENT_ADDRESS", _DEFAULT_PAY_TO)).strip()
+# Treasury payTo: TREASURY_ADDRESS (X402_PAY_TO / X402_RECIPIENT_ADDRESS kept as fallback aliases).
+_DEFAULT_PAY_TO = "0xc22f9CAEBAc37fE72D5142f35f21f6696Ea9Ef69"
+X402_PAY_TO = (
+    os.getenv("TREASURY_ADDRESS", "").strip()
+    or os.getenv("X402_PAY_TO", "").strip()
+    or os.getenv("X402_RECIPIENT_ADDRESS", "").strip()
+    or _DEFAULT_PAY_TO
+)
+
+
+def _assert_checksum_address(addr: str) -> str:
+    import re as _re
+    if not _re.fullmatch(r"0x[0-9a-fA-F]{40}", addr) or int(addr, 16) == 0:
+        raise ValueError("TREASURY_ADDRESS must be a non-zero EVM address")
+    try:
+        from eth_utils import to_checksum_address
+    except ImportError:
+        return addr
+    if to_checksum_address(addr) != addr:
+        raise ValueError("TREASURY_ADDRESS is not EIP-55 checksummed")
+    return addr
+
+
+X402_PAY_TO = _assert_checksum_address(X402_PAY_TO)
 X402_NETWORK = os.getenv("X402_NETWORK", "eip155:84532")
 X402_ASSET = os.getenv("X402_ASSET", "0x036CbD53842c5426634e7929541eC2318f3dCF7e")
 X402_ASSET_DECIMALS = int(os.getenv("X402_ASSET_DECIMALS", "6"))
