@@ -77,7 +77,7 @@ def _assert_checksum_address(addr: str) -> str:
 
 
 X402_PAY_TO = _assert_checksum_address(X402_PAY_TO)
-X402_NETWORK = os.getenv("X402_NETWORK", "eip155:84532")
+X402_NETWORK = os.getenv("X402_NETWORK", "eip155:8453")
 X402_ASSET = os.getenv("X402_ASSET", "0x036CbD53842c5426634e7929541eC2318f3dCF7e")
 X402_ASSET_DECIMALS = int(os.getenv("X402_ASSET_DECIMALS", "6"))
 X402_MAX_TIMEOUT_SECONDS = int(os.getenv("X402_MAX_TIMEOUT_SECONDS", "300"))
